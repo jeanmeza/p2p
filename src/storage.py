@@ -137,6 +137,7 @@ class Node:
     def find_block_to_back_up(self):
         """Returns the block id of a block that needs backing up, or None if there are none."""
 
+        # TODO: to complete
         # find a block that we have locally but not remotely
         # check `enumerate` and `zip`at https://docs.python.org/3/library/functions.html
         for block_id, (held_locally, peer) in enumerate(zip(self.local_blocks, self.backed_up_blocks)):
@@ -154,6 +155,7 @@ class Node:
 
         # first find if we have a backup that a remote node needs
         for peer, block_id in self.remote_blocks_held.items():
+            # TODO: to complete
             # if the block is not present locally and the peer is online and not downloading anything currently, then
             # schedule the restore from self to peer of block_id
             if ... and ... is None and not peer.local_blocks[block_id]:
@@ -167,6 +169,7 @@ class Node:
         # sim.log_info(f"{self} is looking for somebody to back up block {block_id}")
         remote_owners = set(node for node in self.backed_up_blocks if node is not None)  # nodes having one block
         for peer in sim.nodes:
+            # TODO: to complete
             # if the peer is not self, is online, is not among the remote owners, has enough space and is not
             # downloading anything currently, schedule the backup of block_id from self to peer
             if (peer is not self and ... and peer not in ... and peer.current_download is None
@@ -186,10 +189,12 @@ class Node:
 
         # first find if we have a missing block to restore
         for block_id, (held_locally, peer) in enumerate(zip(self.local_blocks, self.backed_up_blocks)):
+            # TODO: to complete
             if not ... and peer is not None and ... and ... is None:
                 ...
                 return  # we are done in this case
 
+        # TODO: to complete
         # try to back up a block for a remote node
         for peer in sim.nodes:
             if (peer is not self and ... and ... is None and peer not in ...
@@ -231,10 +236,10 @@ class Online(NodeEvent):
         if node.online or node.failed:
             return
         node.online = True
-        # schedule next upload and download
+        # TODO: schedule next upload and download
         ...
         ...
-        # schedule the next offline event
+        # TODO: schedule the next offline event
         ...
 
 
@@ -353,6 +358,7 @@ class BlockRestoreComplete(TransferComplete):
         owner = self.downloader
         owner.local_blocks[self.block_id] = True
         if sum(owner.local_blocks) == owner.k:  # we have exactly k local blocks, we have all of them then
+            # TODO: to complete
             ...
 
 
@@ -386,6 +392,7 @@ def main():
         class_config = config[node_class]
         # list comprehension: https://docs.python.org/3/tutorial/datastructures.html#list-comprehensions
         cfg = [parse(class_config[name]) for name, parse in parsing_functions]
+        # TODO: to complete (maybe)
         # the `callable(p1, p2, *args)` idiom is equivalent to `callable(p1, p2, args[0], args[1], ...)
         nodes.extend(Node(f"{node_class}-{i}", *cfg) for i in range(class_config.getint('number')))
     sim = Backup(nodes)
