@@ -1,0 +1,45 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Debug P2P",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/src/storage.py",
+      "console": "integratedTerminal",
+      "args": [
+        "src/p2p.cfg",
+        "--max-t",
+        "100 years",
+        "--seed",
+        "42",
+        "--verbose"
+      ],
+      "env": {
+        "VENV_DIR": "${workspaceFolder}/.venv"
+      },
+      "preLaunchTask": "Activate virtual environment",
+      "redirectOutput": true
+    },
+    {
+      "name": "Debug Client-Server",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/src/storage.py",
+      "console": "integratedTerminal",
+      "args": [
+        "src/client_server.cfg",
+        "--max-t",
+        "100 years",
+        "--seed",
+        "42",
+        "--verbose"
+      ],
+      "env": {
+        "VENV_DIR": "${workspaceFolder}/.venv"
+      },
+      "preLaunchTask": "Activate virtual environment",
+      "redirectOutput": true
+    }
+  ]
+}
