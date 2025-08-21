@@ -10,16 +10,14 @@
       "args": [
         "src/p2p.cfg",
         "--max-t",
-        "100 years",
+        "5 years",
         "--seed",
         "42",
         "--verbose"
       ],
       "env": {
         "VENV_DIR": "${workspaceFolder}/.venv"
-      },
-      "preLaunchTask": "Activate virtual environment",
-      "redirectOutput": true
+      }
     },
     {
       "name": "Debug Client-Server",
@@ -30,16 +28,14 @@
       "args": [
         "src/client_server.cfg",
         "--max-t",
-        "100 years",
+        "5 years",
         "--seed",
         "42",
         "--verbose"
       ],
       "env": {
         "VENV_DIR": "${workspaceFolder}/.venv"
-      },
-      "preLaunchTask": "Activate virtual environment",
-      "redirectOutput": true
+      }
     }
   ]
 }

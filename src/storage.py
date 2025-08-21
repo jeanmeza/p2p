@@ -37,10 +37,17 @@ class Backup(Simulation):
         super().__init__()  # call the __init__ method of parent class
         self.nodes = nodes
 
+        # Statistics tracking
+        self.data_loss_events = 0
+        self.nodes_with_data_loss = set()
+
         # we add to the event queue the first event of each node going online and of failing
         for node in nodes:
             self.schedule(node.arrival_time, Online(node))
             self.schedule(node.arrival_time + exp_rv(node.average_lifetime), Fail(node))
+
+        # Schedule periodic data loss checks every 30 days
+        self.schedule(30 * 24 * 3600, DataLossCheck())  # 30 days in seconds
 
     def schedule_transfer(
         self, uploader: "Node", downloader: "Node", block_id: int, restore: bool
@@ -69,6 +76,42 @@ class Backup(Simulation):
 
         # self.log_info(f"scheduled {event.__class__.__name__} from {uploader} to {downloader}"
         #               f" in {format_timespan(delay)}")
+
+    def check_system_data_loss(self):
+        """Check if any node in the system has permanently lost data.
+
+        Returns:
+            list: List of nodes that have lost data, each as (node, available_blocks)
+        """
+        lost_nodes = []
+        for node in self.nodes:
+            is_lost, available_blocks = node.check_data_loss()
+            if is_lost:
+                lost_nodes.append((node, available_blocks))
+        return lost_nodes
+
+    def report_data_loss(self, context=""):
+        """Check for and report any data loss in the system.
+
+        Args:
+            context (str): Optional context string for logging (e.g., "after peer-4 failure")
+        """
+        lost_nodes = self.check_system_data_loss()
+        if lost_nodes:
+            for node, available_blocks in lost_nodes:
+                if node not in self.nodes_with_data_loss:
+                    # First time this node lost data
+                    self.data_loss_events += 1
+                    self.nodes_with_data_loss.add(node)
+
+                    # Format the log message with optional context
+                    context_str = f" {context}" if context else ""
+                    self.log_info(
+                        f"DATA LOSS DETECTED{context_str}: {node} has lost data! "
+                        f"Only {available_blocks}/{node.k} blocks available"
+                    )
+                    # Optionally raise exception to stop simulation
+                    # raise DataLost(f"Data permanently lost for {node}")
 
     def log_info(self, msg):
         """Override method to get human-friendly logging for time."""
@@ -236,6 +279,29 @@ class Node:
                     sim.schedule_transfer(peer, self, block_id, restore=False)
                     return
 
+    def check_data_loss(self):
+        """Check if this node's data is permanently lost (fewer than k blocks available).
+
+        Returns:
+            (bool, int): (is_data_lost, available_blocks)
+        """
+        if self.k == 0:  # Server nodes with no data to backup
+            return False, 0
+
+        available_blocks = 0
+
+        # Count local blocks
+        available_blocks += sum(self.local_blocks)
+
+        # Count backed up blocks that are still accessible
+        for block_id, peer in enumerate(self.backed_up_blocks):
+            if peer is not None and not peer.failed:
+                available_blocks += 1
+
+        # If we have fewer than k blocks available, data is lost
+        is_lost = available_blocks < self.k
+        return is_lost, available_blocks
+
     def __hash__(self):
         """Function that allows us to have `Node`s as dictionary keys or set items.
 
@@ -247,6 +313,17 @@ class Node:
         """Function that will be called when converting this to a string (e.g., when logging or printing)."""
 
         return self.name
+
+
+class DataLossCheck(Event):
+    """Periodic event to check for data loss in the system."""
+
+    def process(self, sim: Backup):
+        # Use the centralized data loss reporting method
+        sim.report_data_loss()
+
+        # Schedule next data loss check (every 30 days)
+        sim.schedule(30 * 24 * 3600, DataLossCheck())  # 30 days in seconds
 
 
 @dataclass
@@ -264,6 +341,7 @@ class Online(NodeEvent):
     """A node goes online."""
 
     def process(self, sim: Backup):
+        sim.log_info(f"{self.node} goes online")
         node = self.node
         if node.online or node.failed:
             return
@@ -279,6 +357,7 @@ class Recover(Online):
     """A node goes online after recovering from a failure."""
 
     def process(self, sim: Backup):
+        sim.log_info(f"{self.node} recovers")
         node = self.node
         sim.log_info(f"{node} recovers")
         node.failed = False
@@ -313,6 +392,7 @@ class Offline(Disconnection):
     """A node goes offline."""
 
     def process(self, sim: Backup):
+        sim.log_info(f"{self.node} goes offline")
         node = self.node
         if node.failed or not node.online:
             return
@@ -343,6 +423,9 @@ class Fail(Disconnection):
         # schedule the next online and recover events
         recover_time = exp_rv(node.average_recover_time)
         sim.schedule(recover_time, Recover(node))
+
+        # Check for data loss after this failure using centralized method
+        sim.report_data_loss(f"after {node} failure")
 
 
 @dataclass
@@ -453,6 +536,18 @@ def main():
     sim = Backup(nodes)
     sim.run(parse_timespan(args.max_t))
     sim.log_info(f"Simulation over")
+
+    # Report data loss statistics
+    sim.log_info(f"Data loss events: {sim.data_loss_events}")
+    sim.log_info(
+        f"Nodes with data loss: {len(sim.nodes_with_data_loss)} out of {len(nodes)}"
+    )
+    if sim.nodes_with_data_loss:
+        sim.log_info(
+            f"Affected nodes: {[str(node) for node in sim.nodes_with_data_loss]}"
+        )
+    else:
+        sim.log_info("No data loss detected during simulation")
 
 
 if __name__ == "__main__":
