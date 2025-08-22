@@ -60,22 +60,34 @@ class Backup(Simulation):
 
         block_size = downloader.block_size if restore else uploader.block_size
 
-        assert uploader.current_upload is None
-        assert downloader.current_download is None
+        # Calculate effective transfer speed considering available bandwidth
+        available_upload = uploader.available_upload_bandwidth()
+        available_download = downloader.available_download_bandwidth()
+        speed = min(available_upload, available_download)
 
-        speed = min(
-            uploader.upload_speed, downloader.download_speed
-        )  # we take the slowest between the two
+        if speed <= 0:
+            return False  # No bandwidth available
+
         delay = block_size / speed
         if restore:
             event = BlockRestoreComplete(uploader, downloader, block_id)
         else:
             event = BlockBackupComplete(uploader, downloader, block_id)
+
+        # Store transfer speed in the event for bandwidth tracking
+        event.transfer_speed = speed
+
         self.schedule(delay, event)
-        uploader.current_upload = downloader.current_download = event
+
+        # Track bandwidth usage and add to current transfer lists
+        uploader.used_upload_bandwidth += speed
+        downloader.used_download_bandwidth += speed
+        uploader.current_uploads.append(event)
+        downloader.current_downloads.append(event)
 
         # self.log_info(f"scheduled {event.__class__.__name__} from {uploader} to {downloader}"
         #               f" in {format_timespan(delay)}")
+        return True
 
     def check_system_data_loss(self):
         """Check if any node in the system has permanently lost data.
@@ -179,9 +191,13 @@ class Node:
         # (owner -> block_id) mapping for remote blocks stored
         self.remote_blocks_held: dict[Node, int] = {}
 
-        # current uploads and downloads, stored as a reference to the relative TransferComplete event
-        self.current_upload: Optional[TransferComplete] = None
-        self.current_download: Optional[TransferComplete] = None
+        # current uploads and downloads, stored as lists of TransferComplete events
+        self.current_uploads: List[TransferComplete] = []
+        self.current_downloads: List[TransferComplete] = []
+
+        # bandwidth tracking
+        self.used_upload_bandwidth: float = 0.0
+        self.used_download_bandwidth: float = 0.0
 
     def find_block_to_back_up(self):
         """Returns the block id of a block that needs backing up, or None if there are none."""
@@ -196,49 +212,70 @@ class Node:
                 return block_id
         return None
 
+    def available_upload_bandwidth(self) -> float:
+        """Return available upload bandwidth (bytes/second)."""
+        return max(0, self.upload_speed - self.used_upload_bandwidth)
+
+    def available_download_bandwidth(self) -> float:
+        """Return available download bandwidth (bytes/second)."""
+        return max(0, self.download_speed - self.used_download_bandwidth)
+
+    def can_start_upload(self, block_size: int, transfer_speed: float) -> bool:
+        """Check if we can start a new upload with the given speed requirements."""
+        return self.used_upload_bandwidth + transfer_speed <= self.upload_speed
+
+    def can_start_download(self, block_size: int, transfer_speed: float) -> bool:
+        """Check if we can start a new download with the given speed requirements."""
+        return self.used_download_bandwidth + transfer_speed <= self.download_speed
+
     def schedule_next_upload(self, sim: Backup):
         """Schedule the next upload, if any."""
 
         assert self.online
 
-        if self.current_upload is not None:
-            return
+        # Continue scheduling uploads as long as we have available bandwidth
+        while self.available_upload_bandwidth() > 0:
+            upload_scheduled = False
 
-        # first find if we have a backup that a remote node needs
-        for peer, block_id in self.remote_blocks_held.items():
-            # DONE
-            # if the block is not present locally and the peer is online and not
-            # downloading anything currently, then schedule the restore from self to
-            # peer of block_id
-            if (
-                peer.online
-                and peer.current_download is None
-                and not peer.local_blocks[block_id]
-            ):
-                sim.schedule_transfer(self, peer, block_id, restore=True)
-                return  # we have found our upload, we stop
+            # first find if we have a backup that a remote node needs
+            for peer, block_id in self.remote_blocks_held.items():
+                # Check if the block is not present locally and the peer is online and has download bandwidth
+                if (
+                    peer.online
+                    and peer.available_download_bandwidth() > 0
+                    and not peer.local_blocks[block_id]
+                ):
+                    if sim.schedule_transfer(self, peer, block_id, restore=True):
+                        upload_scheduled = True
+                        break  # we have found our upload, break from inner loop
 
-        # try to back up a block on a locally held remote node
-        block_id = self.find_block_to_back_up()
-        if block_id is None:
-            return
-        # sim.log_info(f"{self} is looking for somebody to back up block {block_id}")
-        remote_owners = set(
-            node for node in self.backed_up_blocks if node is not None
-        )  # nodes having one block
-        for peer in sim.nodes:
-            # DONE: to complete
-            # if the peer is not self, is online, is not among the remote owners, has enough space and is not
-            # downloading anything currently, schedule the backup of block_id from self to peer
-            if (
-                peer is not self
-                and peer.online
-                and peer not in remote_owners
-                and peer.current_download is None
-                and peer.free_space >= self.block_size
-            ):
-                sim.schedule_transfer(self, peer, block_id, restore=False)
-                return
+            if upload_scheduled:
+                continue  # Try to schedule another upload
+
+            # try to back up a block on a locally held remote node
+            block_id = self.find_block_to_back_up()
+            if block_id is None:
+                break  # No more blocks to back up
+
+            # sim.log_info(f"{self} is looking for somebody to back up block {block_id}")
+            remote_owners = set(
+                node for node in self.backed_up_blocks if node is not None
+            )  # nodes having one block
+            for peer in sim.nodes:
+                # Check if peer can accept the backup
+                if (
+                    peer is not self
+                    and peer.online
+                    and peer not in remote_owners
+                    and peer.available_download_bandwidth() > 0
+                    and peer.free_space >= self.block_size
+                ):
+                    if sim.schedule_transfer(self, peer, block_id, restore=False):
+                        upload_scheduled = True
+                        break  # we have found our upload, break from inner loop
+
+            if not upload_scheduled:
+                break  # No more uploads possible
 
     def schedule_next_download(self, sim: Backup):
         """Schedule the next download, if any."""
@@ -247,37 +284,44 @@ class Node:
 
         # sim.log_info(f"schedule_next_download on {self}")
 
-        if self.current_download is not None:
-            return
+        # Continue scheduling downloads as long as we have available bandwidth
+        while self.available_download_bandwidth() > 0:
+            download_scheduled = False
 
-        # first find if we have a missing block to restore
-        for block_id, (held_locally, peer) in enumerate(
-            zip(self.local_blocks, self.backed_up_blocks)
-        ):
-            # DONE: to complete
-            if (
-                not held_locally
-                and peer is not None
-                and peer.online
-                and peer.current_upload is None
+            # first find if we have a missing block to restore
+            for block_id, (held_locally, peer) in enumerate(
+                zip(self.local_blocks, self.backed_up_blocks)
             ):
-                sim.schedule_transfer(peer, self, block_id, restore=True)
-                return  # we are done in this case
+                if (
+                    not held_locally
+                    and peer is not None
+                    and peer.online
+                    and peer.available_upload_bandwidth() > 0
+                ):
+                    if sim.schedule_transfer(peer, self, block_id, restore=True):
+                        download_scheduled = True
+                        break  # we are done with this restore
 
-        # DONE: to complete
-        # try to back up a block for a remote node
-        for peer in sim.nodes:
-            if (
-                peer is not self
-                and peer.online
-                and peer.current_upload is None
-                and peer not in self.remote_blocks_held
-                and self.free_space >= self.block_size
-            ):
-                block_id = peer.find_block_to_back_up()
-                if block_id is not None:
-                    sim.schedule_transfer(peer, self, block_id, restore=False)
-                    return
+            if download_scheduled:
+                continue  # Try to schedule another download
+
+            # try to back up a block for a remote node
+            for peer in sim.nodes:
+                if (
+                    peer is not self
+                    and peer.online
+                    and peer.available_upload_bandwidth() > 0
+                    and peer not in self.remote_blocks_held
+                    and self.free_space >= self.block_size
+                ):
+                    block_id = peer.find_block_to_back_up()
+                    if block_id is not None:
+                        if sim.schedule_transfer(peer, self, block_id, restore=False):
+                            download_scheduled = True
+                            break  # Found a backup to download
+
+            if not download_scheduled:
+                break  # No more downloads possible
 
     def check_data_loss(self):
         """Check if this node's data is permanently lost (fewer than k blocks available).
@@ -375,17 +419,39 @@ class Disconnection(NodeEvent):
     def disconnect(self):
         node = self.node
         node.online = False
-        # cancel current upload and download
-        # retrieve the nodes we're uploading and downloading to and set their current downloads and uploads to None
-        current_upload, current_download = node.current_upload, node.current_download
-        if current_upload is not None:
-            current_upload.canceled = True
-            current_upload.downloader.current_download = None
-            node.current_upload = None
-        if current_download is not None:
-            current_download.canceled = True
-            current_download.uploader.current_upload = None
-            node.current_download = None
+
+        # Cancel all current uploads and downloads
+        for upload in node.current_uploads[
+            :
+        ]:  # Copy list to avoid modification during iteration
+            upload.canceled = True
+            if upload in upload.downloader.current_downloads:
+                upload.downloader.current_downloads.remove(upload)
+                upload.downloader.used_download_bandwidth -= getattr(
+                    upload, "transfer_speed", 0
+                )
+                upload.downloader.used_download_bandwidth = max(
+                    0, upload.downloader.used_download_bandwidth
+                )
+
+        for download in node.current_downloads[
+            :
+        ]:  # Copy list to avoid modification during iteration
+            download.canceled = True
+            if download in download.uploader.current_uploads:
+                download.uploader.current_uploads.remove(download)
+                download.uploader.used_upload_bandwidth -= getattr(
+                    download, "transfer_speed", 0
+                )
+                download.uploader.used_upload_bandwidth = max(
+                    0, download.uploader.used_upload_bandwidth
+                )
+
+        # Clear the node's transfer lists and reset bandwidth usage
+        node.current_uploads.clear()
+        node.current_downloads.clear()
+        node.used_upload_bandwidth = 0.0
+        node.used_download_bandwidth = 0.0
 
 
 class Offline(Disconnection):
@@ -414,7 +480,7 @@ class Fail(Disconnection):
         # lose all remote data
         for owner, block_id in node.remote_blocks_held.items():
             owner.backed_up_blocks[block_id] = None
-            if owner.online and owner.current_upload is None:
+            if owner.online:
                 owner.schedule_next_upload(
                     sim
                 )  # this node may want to back up the missing block
@@ -439,6 +505,8 @@ class TransferComplete(Event):
 
     def __post_init__(self):
         assert self.uploader is not self.downloader
+        # transfer_speed will be set by schedule_transfer when the event is created
+        self.transfer_speed: float = 0.0
 
     def process(self, sim: Backup):
         sim.log_info(
@@ -449,7 +517,23 @@ class TransferComplete(Event):
         uploader, downloader = self.uploader, self.downloader
         assert uploader.online and downloader.online
         self.update_block_state()
-        uploader.current_upload = downloader.current_download = None
+
+        # Remove this transfer from current transfer lists and free up bandwidth
+        if self in uploader.current_uploads:
+            uploader.current_uploads.remove(self)
+            uploader.used_upload_bandwidth -= getattr(self, "transfer_speed", 0)
+            uploader.used_upload_bandwidth = max(
+                0, uploader.used_upload_bandwidth
+            )  # Avoid negative
+
+        if self in downloader.current_downloads:
+            downloader.current_downloads.remove(self)
+            downloader.used_download_bandwidth -= getattr(self, "transfer_speed", 0)
+            downloader.used_download_bandwidth = max(
+                0, downloader.used_download_bandwidth
+            )  # Avoid negative
+
+        # Try to schedule more transfers now that bandwidth is available
         uploader.schedule_next_upload(sim)
         downloader.schedule_next_download(sim)
         for node in [uploader, downloader]:
