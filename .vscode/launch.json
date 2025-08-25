@@ -7,14 +7,7 @@
       "request": "launch",
       "program": "${workspaceFolder}/src/storage.py",
       "console": "integratedTerminal",
-      "args": [
-        "src/p2p.cfg",
-        "--max-t",
-        "5 years",
-        "--seed",
-        "42",
-        "--verbose"
-      ],
+      "args": ["src/p2p.cfg", "--max-t", "1 year", "--seed", "42", "--verbose"],
       "env": {
         "VENV_DIR": "${workspaceFolder}/.venv"
       }
@@ -28,7 +21,7 @@
       "args": [
         "src/client_server.cfg",
         "--max-t",
-        "5 years",
+        "1 year",
         "--seed",
         "42",
         "--verbose"
