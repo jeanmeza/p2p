@@ -24,25 +24,34 @@ def exp_rv(mean):
 
 class DataLost(Exception):
     """Not enough redundancy in the system, data is lost. We raise this exception to stop the simulation."""
+
     pass
 
 
 class Backup(Simulation):
-    """Backup simulation.
-    """
+    """Backup simulation."""
 
     # type annotations for `Node` are strings here to allow a forward declaration:
     # https://stackoverflow.com/questions/36193540/self-reference-or-forward-reference-of-type-annotations-in-python
-    def __init__(self, nodes: List['Node']):
+    def __init__(self, nodes: List["Node"]):
         super().__init__()  # call the __init__ method of parent class
         self.nodes = nodes
+
+        # Statistics tracking
+        self.data_loss_events = 0
+        self.nodes_with_data_loss = set()
 
         # we add to the event queue the first event of each node going online and of failing
         for node in nodes:
             self.schedule(node.arrival_time, Online(node))
             self.schedule(node.arrival_time + exp_rv(node.average_lifetime), Fail(node))
 
-    def schedule_transfer(self, uploader: 'Node', downloader: 'Node', block_id: int, restore: bool):
+        # Schedule periodic data loss checks every 30 days
+        self.schedule(30 * 24 * 3600, DataLossCheck())  # 30 days in seconds
+
+    def schedule_transfer(
+        self, uploader: "Node", downloader: "Node", block_id: int, restore: bool
+    ):
         """Helper function called by `Node.schedule_next_upload` and `Node.schedule_next_download`.
 
         If `restore` is true, we are restoring a block owned by the downloader, otherwise, we are saving one owned by
@@ -54,7 +63,9 @@ class Backup(Simulation):
         assert uploader.current_upload is None
         assert downloader.current_download is None
 
-        speed = min(uploader.upload_speed, downloader.download_speed)  # we take the slowest between the two
+        speed = min(
+            uploader.upload_speed, downloader.download_speed
+        )  # we take the slowest between the two
         delay = block_size / speed
         if restore:
             event = BlockRestoreComplete(uploader, downloader, block_id)
@@ -66,13 +77,51 @@ class Backup(Simulation):
         # self.log_info(f"scheduled {event.__class__.__name__} from {uploader} to {downloader}"
         #               f" in {format_timespan(delay)}")
 
+    def check_system_data_loss(self):
+        """Check if any node in the system has permanently lost data.
+
+        Returns:
+            list: List of nodes that have lost data, each as (node, available_blocks)
+        """
+        lost_nodes = []
+        for node in self.nodes:
+            is_lost, available_blocks = node.check_data_loss()
+            if is_lost:
+                lost_nodes.append((node, available_blocks))
+        return lost_nodes
+
+    def report_data_loss(self, context=""):
+        """Check for and report any data loss in the system.
+
+        Args:
+            context (str): Optional context string for logging (e.g., "after peer-4 failure")
+        """
+        lost_nodes = self.check_system_data_loss()
+        if lost_nodes:
+            for node, available_blocks in lost_nodes:
+                if node not in self.nodes_with_data_loss:
+                    # First time this node lost data
+                    self.data_loss_events += 1
+                    self.nodes_with_data_loss.add(node)
+
+                    # Format the log message with optional context
+                    context_str = f" {context}" if context else ""
+                    self.log_info(
+                        f"DATA LOSS DETECTED{context_str}: {node} has lost data! "
+                        f"Only {available_blocks}/{node.k} blocks available"
+                    )
+                    # Optionally raise exception to stop simulation
+                    # raise DataLost(f"Data permanently lost for {node}")
+
     def log_info(self, msg):
         """Override method to get human-friendly logging for time."""
 
-        logging.info(f'{format_timespan(self.t)}: {msg}')
+        logging.info(f"{format_timespan(self.t)}: {msg}")
 
 
-@dataclass(eq=False)  # auto initialization from parameters below (won't consider two nodes with same state as equal)
+@dataclass(
+    eq=False
+)  # auto initialization from parameters below (won't consider two nodes with same state as equal)
 class Node:
     """Class representing the configuration of a given node."""
 
@@ -140,10 +189,10 @@ class Node:
         # DONE: to complete
         # find a block that we have locally but not remotely
         # check `enumerate` and `zip`at https://docs.python.org/3/library/functions.html
-        for block_id, (held_locally, peer) in enumerate(zip(self.local_blocks, self.backed_up_blocks)):
-            # `peer is not None` check before accessing `peer.local_blocks` is needed to
-            #  avoid AttributeError if the peer is None
-            if held_locally and peer is not None and peer.online and not peer.local_blocks[block_id] is None:
+        for block_id, (held_locally, peer) in enumerate(
+            zip(self.local_blocks, self.backed_up_blocks)
+        ):
+            if held_locally and peer is None:
                 return block_id
         return None
 
@@ -158,10 +207,14 @@ class Node:
         # first find if we have a backup that a remote node needs
         for peer, block_id in self.remote_blocks_held.items():
             # DONE
-            # if the block is not present locally and the peer is online and not 
-            # downloading anything currently, then schedule the restore from self to 
+            # if the block is not present locally and the peer is online and not
+            # downloading anything currently, then schedule the restore from self to
             # peer of block_id
-            if peer.online and peer.current_download is None and not peer.local_blocks[block_id]:
+            if (
+                peer.online
+                and peer.current_download is None
+                and not peer.local_blocks[block_id]
+            ):
                 sim.schedule_transfer(self, peer, block_id, restore=True)
                 return  # we have found our upload, we stop
 
@@ -170,13 +223,20 @@ class Node:
         if block_id is None:
             return
         # sim.log_info(f"{self} is looking for somebody to back up block {block_id}")
-        remote_owners = set(node for node in self.backed_up_blocks if node is not None)  # nodes having one block
+        remote_owners = set(
+            node for node in self.backed_up_blocks if node is not None
+        )  # nodes having one block
         for peer in sim.nodes:
             # DONE: to complete
             # if the peer is not self, is online, is not among the remote owners, has enough space and is not
             # downloading anything currently, schedule the backup of block_id from self to peer
-            if (peer is not self and peer.online and peer not in remote_owners and peer.current_download is None
-                    and peer.free_space >= peer.block_size):
+            if (
+                peer is not self
+                and peer.online
+                and peer not in remote_owners
+                and peer.current_download is None
+                and peer.free_space >= self.block_size
+            ):
                 sim.schedule_transfer(self, peer, block_id, restore=False)
                 return
 
@@ -191,21 +251,56 @@ class Node:
             return
 
         # first find if we have a missing block to restore
-        for block_id, (held_locally, peer) in enumerate(zip(self.local_blocks, self.backed_up_blocks)):
+        for block_id, (held_locally, peer) in enumerate(
+            zip(self.local_blocks, self.backed_up_blocks)
+        ):
             # DONE: to complete
-            if not held_locally and peer is not None and peer.online and peer.current_upload is None:
+            if (
+                not held_locally
+                and peer is not None
+                and peer.online
+                and peer.current_upload is None
+            ):
                 sim.schedule_transfer(peer, self, block_id, restore=True)
                 return  # we are done in this case
 
         # DONE: to complete
         # try to back up a block for a remote node
         for peer in sim.nodes:
-            if (peer is not self and peer.online and peer.current_upload is None and peer not in self.remote_blocks_held
-                    and self.free_space >= self.block_size):
+            if (
+                peer is not self
+                and peer.online
+                and peer.current_upload is None
+                and peer not in self.remote_blocks_held
+                and self.free_space >= self.block_size
+            ):
                 block_id = peer.find_block_to_back_up()
                 if block_id is not None:
                     sim.schedule_transfer(peer, self, block_id, restore=False)
                     return
+
+    def check_data_loss(self):
+        """Check if this node's data is permanently lost (fewer than k blocks available).
+
+        Returns:
+            (bool, int): (is_data_lost, available_blocks)
+        """
+        if self.k == 0:  # Server nodes with no data to backup
+            return False, 0
+
+        available_blocks = 0
+
+        # Count local blocks
+        available_blocks += sum(self.local_blocks)
+
+        # Count backed up blocks that are still accessible
+        for block_id, peer in enumerate(self.backed_up_blocks):
+            if peer is not None and not peer.failed:
+                available_blocks += 1
+
+        # If we have fewer than k blocks available, data is lost
+        is_lost = available_blocks < self.k
+        return is_lost, available_blocks
 
     def __hash__(self):
         """Function that allows us to have `Node`s as dictionary keys or set items.
@@ -218,6 +313,17 @@ class Node:
         """Function that will be called when converting this to a string (e.g., when logging or printing)."""
 
         return self.name
+
+
+class DataLossCheck(Event):
+    """Periodic event to check for data loss in the system."""
+
+    def process(self, sim: Backup):
+        # Use the centralized data loss reporting method
+        sim.report_data_loss()
+
+        # Schedule next data loss check (every 30 days)
+        sim.schedule(30 * 24 * 3600, DataLossCheck())  # 30 days in seconds
 
 
 @dataclass
@@ -235,6 +341,7 @@ class Online(NodeEvent):
     """A node goes online."""
 
     def process(self, sim: Backup):
+        sim.log_info(f"{self.node} goes online")
         node = self.node
         if node.online or node.failed:
             return
@@ -250,6 +357,7 @@ class Recover(Online):
     """A node goes online after recovering from a failure."""
 
     def process(self, sim: Backup):
+        sim.log_info(f"{self.node} recovers")
         node = self.node
         sim.log_info(f"{node} recovers")
         node.failed = False
@@ -284,6 +392,7 @@ class Offline(Disconnection):
     """A node goes offline."""
 
     def process(self, sim: Backup):
+        sim.log_info(f"{self.node} goes offline")
         node = self.node
         if node.failed or not node.online:
             return
@@ -306,12 +415,17 @@ class Fail(Disconnection):
         for owner, block_id in node.remote_blocks_held.items():
             owner.backed_up_blocks[block_id] = None
             if owner.online and owner.current_upload is None:
-                owner.schedule_next_upload(sim)  # this node may want to back up the missing block
+                owner.schedule_next_upload(
+                    sim
+                )  # this node may want to back up the missing block
         node.remote_blocks_held.clear()
         node.free_space = node.storage_size - node.block_size * node.n
         # schedule the next online and recover events
         recover_time = exp_rv(node.average_recover_time)
         sim.schedule(recover_time, Recover(node))
+
+        # Check for data loss after this failure using centralized method
+        sim.report_data_loss(f"after {node} failure")
 
 
 @dataclass
@@ -327,7 +441,9 @@ class TransferComplete(Event):
         assert self.uploader is not self.downloader
 
     def process(self, sim: Backup):
-        sim.log_info(f"{self.__class__.__name__} from {self.uploader} to {self.downloader}")
+        sim.log_info(
+            f"{self.__class__.__name__} from {self.uploader} to {self.downloader}"
+        )
         if self.canceled:
             return  # this transfer was canceled, so ignore this event
         uploader, downloader = self.uploader, self.downloader
@@ -337,9 +453,11 @@ class TransferComplete(Event):
         uploader.schedule_next_upload(sim)
         downloader.schedule_next_download(sim)
         for node in [uploader, downloader]:
-            sim.log_info(f"{node}: {sum(node.local_blocks)} local blocks, "
-                         f"{sum(peer is not None for peer in node.backed_up_blocks)} backed up blocks, "
-                         f"{len(node.remote_blocks_held)} remote blocks held")
+            sim.log_info(
+                f"{node}: {sum(node.local_blocks)} local blocks, "
+                f"{sum(peer is not None for peer in node.backed_up_blocks)} backed up blocks, "
+                f"{len(node.remote_blocks_held)} remote blocks held"
+            )
 
     def update_block_state(self):
         """Needs to be specified by the subclasses, `BackupComplete` and `DownloadComplete`."""
@@ -360,13 +478,17 @@ class BlockRestoreComplete(TransferComplete):
     def update_block_state(self):
         owner = self.downloader
         owner.local_blocks[self.block_id] = True
-        if sum(owner.local_blocks) == owner.k:  # we have exactly k local blocks, we have all of them then
-            # TODO: to complete
-            owner.local_blocks = [True] * self.n
+        if (
+            sum(owner.local_blocks) >= owner.k
+        ):  # we have at least k local blocks, we can recover all data
+            # DONE: to complete
+            owner.local_blocks = [True] * owner.n
             owner.failed = False
+            # Clear remote blocks held since we now have all our data locally
+            for peer, block_id in owner.remote_blocks_held.items():
+                peer.backed_up_blocks[block_id] = None
+                peer.free_space += owner.block_size
             owner.remote_blocks_held.clear()
-        else:
-            owner.failed = True
 
 
 def main():
@@ -374,22 +496,29 @@ def main():
     parser.add_argument("config", help="configuration file")
     parser.add_argument("--max-t", default="100 years")
     parser.add_argument("--seed", help="random seed")
-    parser.add_argument("--verbose", action='store_true')
+    parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
 
     if args.seed:
         random.seed(args.seed)  # set a seed to make experiments repeatable
     if args.verbose:
-        logging.basicConfig(format='{levelname}:{message}', level=logging.INFO, style='{')  # output info on stdout
+        logging.basicConfig(
+            format="{levelname}:{message}", level=logging.INFO, style="{"
+        )  # output info on stdout
 
     # functions to parse every parameter of peer configuration
     parsing_functions = [
-        ('n', int), ('k', int),
-        ('data_size', parse_size), ('storage_size', parse_size),
-        ('upload_speed', parse_size), ('download_speed', parse_size),
-        ('average_uptime', parse_timespan), ('average_downtime', parse_timespan),
-        ('average_lifetime', parse_timespan), ('average_recover_time', parse_timespan),
-        ('arrival_time', parse_timespan)
+        ("n", int),
+        ("k", int),
+        ("data_size", parse_size),
+        ("storage_size", parse_size),
+        ("upload_speed", parse_size),
+        ("download_speed", parse_size),
+        ("average_uptime", parse_timespan),
+        ("average_downtime", parse_timespan),
+        ("average_lifetime", parse_timespan),
+        ("average_recover_time", parse_timespan),
+        ("arrival_time", parse_timespan),
     ]
 
     config = configparser.ConfigParser()
@@ -400,11 +529,26 @@ def main():
         # list comprehension: https://docs.python.org/3/tutorial/datastructures.html#list-comprehensions
         cfg = [parse(class_config[name]) for name, parse in parsing_functions]
         # the `callable(p1, p2, *args)` idiom is equivalent to `callable(p1, p2, args[0], args[1], ...)
-        nodes.extend(Node(f"{node_class}-{i}", *cfg) for i in range(class_config.getint('number')))
+        nodes.extend(
+            Node(f"{node_class}-{i}", *cfg)
+            for i in range(class_config.getint("number"))
+        )
     sim = Backup(nodes)
     sim.run(parse_timespan(args.max_t))
     sim.log_info(f"Simulation over")
 
+    # Report data loss statistics
+    sim.log_info(f"Data loss events: {sim.data_loss_events}")
+    sim.log_info(
+        f"Nodes with data loss: {len(sim.nodes_with_data_loss)} out of {len(nodes)}"
+    )
+    if sim.nodes_with_data_loss:
+        sim.log_info(
+            f"Affected nodes: {[str(node) for node in sim.nodes_with_data_loss]}"
+        )
+    else:
+        sim.log_info("No data loss detected during simulation")
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     main()
