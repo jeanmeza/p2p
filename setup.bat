@@ -54,6 +54,3 @@ echo.
 echo === Setup Complete! ===
 echo To activate the environment in the future, run:
 echo   .venv\Scripts\activate.bat
-echo.
-echo To run a simulation example:
-echo   python queue_sim.py --lambd 0.95 --mu 1 --d 10 --n 10 --csv out.csv --max-t 1000000 --seed 42
