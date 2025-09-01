@@ -52,10 +52,12 @@ class Backup(Simulation):
     def schedule_transfer(
         self, uploader: "Node", downloader: "Node", block_id: int, restore: bool
     ):
-        """Helper function called by `Node.schedule_next_upload` and `Node.schedule_next_download`.
+        """
+        Helper function called by `Node.schedule_next_upload` and
+        `Node.schedule_next_download`.
 
-        If `restore` is true, we are restoring a block owned by the downloader, otherwise, we are saving one owned by
-        the uploader.
+        If `restore` is true, we are restoring a block owned by the downloader,
+        otherwise, we are saving one owned by the uploader.
         """
 
         block_size = downloader.block_size if restore else uploader.block_size
@@ -85,8 +87,6 @@ class Backup(Simulation):
         uploader.current_uploads.append(event)
         downloader.current_downloads.append(event)
 
-        # self.log_info(f"scheduled {event.__class__.__name__} from {uploader} to {downloader}"
-        #               f" in {format_timespan(delay)}")
         return True
 
     def check_system_data_loss(self):
