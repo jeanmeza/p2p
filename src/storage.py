@@ -33,9 +33,10 @@ class Backup(Simulation):
 
     # type annotations for `Node` are strings here to allow a forward declaration:
     # https://stackoverflow.com/questions/36193540/self-reference-or-forward-reference-of-type-annotations-in-python
-    def __init__(self, nodes: List["Node"]):
+    def __init__(self, nodes: List["Node"], parallel_enabled: bool = False):
         super().__init__()  # call the __init__ method of parent class
         self.nodes = nodes
+        self.parallel_enabled = parallel_enabled
 
         # Statistics tracking
         self.data_loss_events = 0
@@ -233,6 +234,10 @@ class Node:
 
         assert self.online
 
+        # In single transfer mode, only allow one upload at a time
+        if not sim.parallel_enabled and self.current_uploads:
+            return
+
         # Continue scheduling uploads as long as we have available bandwidth
         while self.available_upload_bandwidth() > 0:
             upload_scheduled = False
@@ -283,6 +288,10 @@ class Node:
         assert self.online
 
         # sim.log_info(f"schedule_next_download on {self}")
+
+        # In single transfer mode, only allow one download at a time
+        if not sim.parallel_enabled and self.current_downloads:
+            return
 
         # Continue scheduling downloads as long as we have available bandwidth
         while self.available_download_bandwidth() > 0:
@@ -581,6 +590,11 @@ def main():
     parser.add_argument("--max-t", default="100 years")
     parser.add_argument("--seed", help="random seed")
     parser.add_argument("--verbose", action="store_true")
+    parser.add_argument(
+        "--parallel-transfers",
+        action="store_true",
+        help="Enable parallel transfers (default: single transfer mode for backward compatibility)",
+    )
     args = parser.parse_args()
 
     if args.seed:
@@ -617,7 +631,7 @@ def main():
             Node(f"{node_class}-{i}", *cfg)
             for i in range(class_config.getint("number"))
         )
-    sim = Backup(nodes)
+    sim = Backup(nodes, parallel_enabled=args.parallel_transfers)
     sim.run(parse_timespan(args.max_t))
     sim.log_info(f"Simulation over")
 
