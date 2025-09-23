@@ -42,6 +42,15 @@ class Backup(Simulation):
         self.data_loss_events = 0
         self.nodes_with_data_loss = set()
 
+        # Performance metrics collection
+        self.metrics = {
+            "transfer_completions": [],  # (time, transfer_type, duration, uploader, downloader)
+            "bandwidth_snapshots": [],  # (time, total_upload_used, total_download_used, total_upload_capacity, total_download_capacity)
+            "recovery_events": [],  # (time, node, blocks_recovered)
+            "data_loss_events_detailed": [],  # (time, node, blocks_lost)
+            "simultaneous_transfers": [],  # (time, num_concurrent_uploads, num_concurrent_downloads)
+        }
+
         # we add to the event queue the first event of each node going online and of failing
         for node in nodes:
             self.schedule(node.arrival_time, Online(node))
@@ -49,6 +58,46 @@ class Backup(Simulation):
 
         # Schedule periodic data loss checks every 30 days
         self.schedule(30 * 24 * 3600, DataLossCheck())  # 30 days in seconds
+
+        # Schedule periodic bandwidth monitoring every 10 seconds
+        self.schedule(10, BandwidthSnapshot())
+
+    def collect_bandwidth_snapshot(self):
+        """Collect current bandwidth utilization across all nodes."""
+        total_upload_used = sum(
+            node.used_upload_bandwidth for node in self.nodes if node.online
+        )
+        total_download_used = sum(
+            node.used_download_bandwidth for node in self.nodes if node.online
+        )
+        total_upload_capacity = sum(
+            node.upload_speed for node in self.nodes if node.online
+        )
+        total_download_capacity = sum(
+            node.download_speed for node in self.nodes if node.online
+        )
+
+        # Count concurrent transfers
+        num_uploads = sum(
+            len(node.current_uploads) for node in self.nodes if node.online
+        )
+        num_downloads = sum(
+            len(node.current_downloads) for node in self.nodes if node.online
+        )
+
+        self.metrics["bandwidth_snapshots"].append(
+            (
+                self.t,
+                total_upload_used,
+                total_download_used,
+                total_upload_capacity,
+                total_download_capacity,
+            )
+        )
+
+        self.metrics["simultaneous_transfers"].append(
+            (self.t, num_uploads, num_downloads)
+        )
 
     def schedule_transfer(
         self, uploader: "Node", downloader: "Node", block_id: int, restore: bool
@@ -130,6 +179,67 @@ class Backup(Simulation):
         """Override method to get human-friendly logging for time."""
 
         logging.info(f"{format_timespan(self.t)}: {msg}")
+
+    def save_metrics(self, filename):
+        """Save collected metrics to a .npz file for efficient analysis."""
+        import numpy as np
+        import os
+
+        # Ensure the results directory exists
+        os.makedirs("results", exist_ok=True)
+
+        # Convert metrics to numpy arrays for efficient storage
+        metrics_arrays = {}
+
+        # Convert transfer completions to structured array
+        if self.metrics["transfer_completions"]:
+            transfer_data = np.array(self.metrics["transfer_completions"], dtype=object)
+            metrics_arrays["transfer_times"] = np.array(
+                [x[0] for x in self.metrics["transfer_completions"]], dtype=np.float64
+            )
+            metrics_arrays["transfer_types"] = np.array(
+                [x[1] for x in self.metrics["transfer_completions"]], dtype="U10"
+            )
+            metrics_arrays["transfer_durations"] = np.array(
+                [x[2] for x in self.metrics["transfer_completions"]], dtype=np.float64
+            )
+            metrics_arrays["uploaders"] = np.array(
+                [x[3] for x in self.metrics["transfer_completions"]], dtype="U20"
+            )
+            metrics_arrays["downloaders"] = np.array(
+                [x[4] for x in self.metrics["transfer_completions"]], dtype="U20"
+            )
+
+        # Convert bandwidth snapshots to arrays
+        if self.metrics["bandwidth_snapshots"]:
+            bw_data = np.array(self.metrics["bandwidth_snapshots"], dtype=np.float64)
+            metrics_arrays["bw_times"] = bw_data[:, 0]
+            metrics_arrays["bw_upload_used"] = bw_data[:, 1]
+            metrics_arrays["bw_download_used"] = bw_data[:, 2]
+            metrics_arrays["bw_upload_capacity"] = bw_data[:, 3]
+            metrics_arrays["bw_download_capacity"] = bw_data[:, 4]
+
+        # Convert simultaneous transfers to arrays
+        if self.metrics["simultaneous_transfers"]:
+            sim_data = np.array(
+                self.metrics["simultaneous_transfers"], dtype=np.float64
+            )
+            metrics_arrays["sim_times"] = sim_data[:, 0]
+            metrics_arrays["sim_uploads"] = sim_data[:, 1]
+            metrics_arrays["sim_downloads"] = sim_data[:, 2]
+
+        # Add metadata as arrays
+        metrics_arrays["metadata_parallel_enabled"] = np.array([self.parallel_enabled])
+        metrics_arrays["metadata_total_nodes"] = np.array([len(self.nodes)])
+        metrics_arrays["metadata_simulation_end_time"] = np.array([self.t])
+        metrics_arrays["metadata_data_loss_events"] = np.array([self.data_loss_events])
+        metrics_arrays["metadata_nodes_with_data_loss"] = np.array(
+            [len(self.nodes_with_data_loss)]
+        )
+
+        np.savez_compressed(filename, **metrics_arrays)
+
+        self.log_info(f"Metrics saved to {filename}.npz")
 
 
 @dataclass(
@@ -379,6 +489,16 @@ class DataLossCheck(Event):
         sim.schedule(30 * 24 * 3600, DataLossCheck())  # 30 days in seconds
 
 
+class BandwidthSnapshot(Event):
+    """Periodic event to collect bandwidth utilization metrics."""
+
+    def process(self, sim: Backup):
+        sim.collect_bandwidth_snapshot()
+
+        # Schedule next bandwidth snapshot (every 10 seconds)
+        sim.schedule(10, BandwidthSnapshot())
+
+
 @dataclass
 class NodeEvent(Event):
     """An event regarding a node. Carries the identifier, i.e., the node's index in `Backup.nodes_config`"""
@@ -525,6 +645,17 @@ class TransferComplete(Event):
             return  # this transfer was canceled, so ignore this event
         uploader, downloader = self.uploader, self.downloader
         assert uploader.online and downloader.online
+
+        # Calculate transfer duration and collect metrics
+        transfer_duration = getattr(self, "transfer_duration", 0)
+        transfer_type = (
+            "restore" if isinstance(self, BlockRestoreComplete) else "backup"
+        )
+
+        sim.metrics["transfer_completions"].append(
+            (sim.t, transfer_type, transfer_duration, uploader.name, downloader.name)
+        )
+
         self.update_block_state()
 
         # Remove this transfer from current transfer lists and free up bandwidth
@@ -595,6 +726,10 @@ def main():
         action="store_true",
         help="Enable parallel transfers (default: single transfer mode for backward compatibility)",
     )
+    parser.add_argument(
+        "--save-metrics",
+        help="Save performance metrics to specified file",
+    )
     args = parser.parse_args()
 
     if args.seed:
@@ -634,6 +769,10 @@ def main():
     sim = Backup(nodes, parallel_enabled=args.parallel_transfers)
     sim.run(parse_timespan(args.max_t))
     sim.log_info(f"Simulation over")
+
+    # Save metrics if requested
+    if args.save_metrics:
+        sim.save_metrics(args.save_metrics)
 
     # Report data loss statistics
     sim.log_info(f"Data loss events: {sim.data_loss_events}")
