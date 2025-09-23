@@ -22,12 +22,6 @@ def exp_rv(mean):
     return expovariate(1 / mean)
 
 
-class DataLost(Exception):
-    """Not enough redundancy in the system, data is lost. We raise this exception to stop the simulation."""
-
-    pass
-
-
 class Backup(Simulation):
     """Backup simulation."""
 

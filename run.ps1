@@ -5,7 +5,8 @@ param(
     [string]$Mode,
     
     [string]$t = "100 years",
-    [string]$cfg
+    [string]$cfg,
+    [switch]$h
 )
 
 function Show-Help {
@@ -18,16 +19,11 @@ function Show-Help {
     Write-Host "Parameters:"
     Write-Host "  -t   <time>              Maximum simulation time (default: '100 years')"
     Write-Host "  -cfg <config>            Configuration file"
+    Write-Host "  -h                       Show help"
     Write-Host ""
     Write-Host "Examples:"
     Write-Host "  .\run.ps1 single -t '100 years'"
     Write-Host "  .\run.ps1 parallel -t '100 years'"
-}
-
-if ([string]::IsNullOrEmpty($cfg)) {
-    Write-Error "Error: Configuration file required."
-    Show-Help
-    exit 1
 }
 
 # Check if help was requested
@@ -39,6 +35,13 @@ if ($h -or $Mode -eq "-h" -or $Mode -eq "--help") {
 # Check if mode is provided
 if ([string]::IsNullOrEmpty($Mode)) {
     Write-Error "Error: Mode required."
+    Show-Help
+    exit 1
+}
+
+
+if ([string]::IsNullOrEmpty($cfg)) {
+    Write-Error "Error: Configuration file required."
     Show-Help
     exit 1
 }
